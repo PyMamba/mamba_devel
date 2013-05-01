@@ -20,5 +20,5 @@ License
     with this program; if not, write to the Free Software Foundation, Inc.,
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-    Have a look on [LICENSE](https://raw.github.com/DamnWidget/mambai_devel/master/LICENSE) file to read the full license
-
+    Have a look on LICENSE_ file to read the full license
+.. _LICENSE: https://raw.github.com/DamnWidget/mambai_devel/master/LICENSE
