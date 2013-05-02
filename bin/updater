@@ -3,6 +3,7 @@
 # See LICENSE for more details
 
 import sys
+sys.path.insert(0, '../../')    # mamba local library always
 
 from twisted.python import log
 

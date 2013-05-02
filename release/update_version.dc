@@ -2,26 +2,34 @@
 # Copyright (c) 2012 - 2013 Oscar Campos <oscar.campos@member.fsf.org>
 # See LICENSE for more details
 
-import sys
 import functools
 
 from twisted.python import log, filepath
 
-from fabric.decorators import task
-from fabric.utils import puts, warn
-from fabric.api import run, quiet, env, lcd, local
+from fabric.tasks import Task
+from fabric.api import lcd, local
+
+mamba_directory = '../../'
 
 
 def check_directory(func):
+    """Decorator to make us sure we are running in the correct directory
+    """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        mamba = filepath.FilePath('../../mamba')
-        mamba_git = filepath.FilePath('../../.git')
+        mamba = filepath.FilePath(mamba_directory)
+        mamba_git = filepath.FilePath(mamba_directory + '.git')
 
         if mamba.exists() and mamba.isdir():
             if mamba_git.exists() and mamba_git.isdir():
+                log.msg('entering {dir} directory...'.format(
+                    dir=mamba_directory))
+                log.msg('entering {dir} directory...'.format(
+                    dir=mamba_directory))
                 return func(*args, **kwargs)
+                log.msg('leaving {dir} directory...'.format(
+                    dir=mamba_directory))
 
         raise RuntimeError(
             'You must run this script in mamba/devtools/bin directory')
@@ -29,13 +37,107 @@ def check_directory(func):
     return wrapper
 
 
-class UpdaterSteps(object):
-
-    steps = list()
+class Steps(object):
+    """Just a container to add steps in order and run them
+    """
 
     def __init__(self):
-        pass
+        self.__steps = list()
+
+    @property
+    def length(self):
+        """Return how many steps do we have
+        """
+
+        return len(self.__steps)
+
+    def add(self, step):
+        """Add a new step to the steps
+        """
+
+        self.__steps.append(step)
+
+    def run(self):
+        """Run all the steps in order
+        """
+
+        for step in self.__steps:
+            try:
+                if callable(step):
+                    step()
+                elif step.get('arguments') is not None:
+                    step['callable'](step['arguments'])
+                else:
+                    step['callable']()
+            except Exception as error:
+                log.err(
+                    'error executing step {step_number}: {error}'.format(
+                        step_number=self.__steps.index(step), error=error)
+                )
+                return
+
+
+class Updater(object):
+    """Just a convenience class for update versions
+    """
+
+    git_versions = {}
 
     @check_directory
-    def update_version():
-        pass
+    def git_pull(self):
+        """Get the latest version of Mamba master branch
+        """
+
+        with lcd(mamba_directory):
+            local('git pull origin master')
+
+    @check_directory
+    def git_update_last_commit(self, check_file=None):
+        """Update the last commit SHA string and Unix timestamp
+        """
+
+        with lcd(mamba_directory):
+            l = local(
+                'git log -1 --pretty=format:"%H %at" {file}'.format(
+                    file=check_file if check_file is not None else ''),
+                capture=True
+            )
+            if check_file is None:
+                check_file = 'mamba'
+
+            self.git_versions[check_file] = l.stdout
+
+    def git_get_last_commit(self, check_file=None):
+        """Get the last commit SHA strign and Unix timestamp
+        """
+
+        if check_file is None:
+            check_file = 'mamba'
+
+        if self.git_versions.get(check_file) is not None:
+            return self.git_versions[check_file]
+        else:
+            self.git_update_last_commit[
+                None if check_file == 'mamba' else check_file]
+            return self.git_versions[check_file]
+
+
+# this task must be the only one task in the entire file
+class Main(Task):
+    """Main deployer entry point
+    """
+    name = 'main'
+
+    def run(self):
+        log.msg('Running {num_tests} steps...'.format(
+            num_tests=updater_steps.length))
+        updater_steps.run()
+
+
+updater = Updater()
+updater_steps = Steps()
+
+updater_steps.add(updater.git_pull)
+
+
+instance = Main()
