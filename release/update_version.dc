@@ -1,0 +1,41 @@
+# -*- mamba-deployer: fabric -*-
+# Copyright (c) 2012 - 2013 Oscar Campos <oscar.campos@member.fsf.org>
+# See LICENSE for more details
+
+import sys
+import functools
+
+from twisted.python import log, filepath
+
+from fabric.decorators import task
+from fabric.utils import puts, warn
+from fabric.api import run, quiet, env, lcd, local
+
+
+def check_directory(func):
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        mamba = filepath.FilePath('../../mamba')
+        mamba_git = filepath.FilePath('../../.git')
+
+        if mamba.exists() and mamba.isdir():
+            if mamba_git.exists() and mamba_git.isdir():
+                return func(*args, **kwargs)
+
+        raise RuntimeError(
+            'You must run this script in mamba/devtools/bin directory')
+
+    return wrapper
+
+
+class UpdaterSteps(object):
+
+    steps = list()
+
+    def __init__(self):
+        pass
+
+    @check_directory
+    def update_version():
+        pass

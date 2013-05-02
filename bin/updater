@@ -1,0 +1,25 @@
+#!/usr/bin/env python
+# Copyright (c) 2013 Oscar Campos <oscar.campos@member.fsf.org>
+# See LICENSE for more details
+
+import sys
+
+from twisted.python import log
+
+from mamba.deployment.fabric_deployer import FabricDeployer
+
+
+log.startLogging(open('./updater.log', 'w'))
+
+
+class Updater(FabricDeployer):
+    """Perform automated update tasks for Mamba releases
+    """
+
+    def __init__(self):
+        super(Updater, self).__init__()
+
+
+if __name__ == '__main__':
+    updater = Updater()
+    updater.deploy(sys.argv[1])
