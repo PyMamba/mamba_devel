@@ -2,12 +2,15 @@
 # Copyright (c) 2012 - 2013 Oscar Campos <oscar.campos@member.fsf.org>
 # See LICENSE for more details
 
+import imp
 import functools
 
 from twisted.python import log, filepath
 
 from fabric.tasks import Task
-from fabric.api import lcd, local
+from fabric.api import lcd, local, abort, env
+
+import settings
 
 mamba_directory = '../../'
 
@@ -23,16 +26,12 @@ def check_directory(func):
 
         if mamba.exists() and mamba.isdir():
             if mamba_git.exists() and mamba_git.isdir():
-                log.msg('entering {dir} directory...'.format(
-                    dir=mamba_directory))
-                log.msg('entering {dir} directory...'.format(
-                    dir=mamba_directory))
-                return func(*args, **kwargs)
-                log.msg('leaving {dir} directory...'.format(
-                    dir=mamba_directory))
+                with lcd(mamba_directory):
+                    result = func(*args, **kwargs)
 
-        raise RuntimeError(
-            'You must run this script in mamba/devtools/bin directory')
+                return result
+
+        abort('You must run this script in mamba/devtools/bin directory')
 
     return wrapper
 
@@ -77,49 +76,212 @@ class Steps(object):
                 return
 
 
-class Updater(object):
-    """Just a convenience class for update versions
+class Git(object):
+    """Just a convenience class for work with git
     """
 
-    git_versions = {}
+    @check_directory
+    def go_master_branch(self):
+        """Go to master branch
+        """
+
+        result = local('git checkout master')
+        if result.failed:
+            abort('We can\'t checkout master: {error}'.format(
+                error=result.stdout + ' ' + result.stderr)
+            )
+
+    @check_directory
+    def get_current_version(self, filename):
+        """Return back the current version if the given script
+        """
+
+        script = imp.load_source('script', filename)
+        return script.__version__
+
+    @check_directory
+    def get_current_mamba_version(self):
+        """Return back the current mamba version
+        """
+
+        mamba = imp.load_source('version', 'mamba/_version.py')
+        return mamba.version
 
     @check_directory
     def git_pull(self):
         """Get the latest version of Mamba master branch
         """
 
-        with lcd(mamba_directory):
-            local('git pull origin master')
+        local('git pull origin master')
 
     @check_directory
-    def git_update_last_commit(self, check_file=None):
-        """Update the last commit SHA string and Unix timestamp
+    def git_compare_versions(self):
+        """Compare the latest versions of mamba scripts
         """
 
-        with lcd(mamba_directory):
+        versions = {}
+        mamba_version = self.get_current_mamba_version()
+
+        for script in filepath.listdir('./mamba/scripts'):
+            if script == 'test':
+                continue
+            if script.endswith('.pyc') or script.endswith('.pyo'):
+                continue
+            if script in ['__init__.py', 'commons.py', 'mamba_admin.py']:
+                continue
+
+            log = 'git log -1 --pretty=format:"%H %at" {v} {script}'
+
             l = local(
-                'git log -1 --pretty=format:"%H %at" {file}'.format(
-                    file=check_file if check_file is not None else ''),
+                log.format(v=mamba_version.short(), script=script),
                 capture=True
             )
-            if check_file is None:
-                check_file = 'mamba'
+            r = local(log.format(v='', script=script), capture=True)
 
-            self.git_versions[check_file] = l.stdout
+            versions[script] = l.stdout == r.stdout
 
-    def git_get_last_commit(self, check_file=None):
-        """Get the last commit SHA strign and Unix timestamp
+        return versions
+
+    @check_directory
+    def current_version_is_last_version(self):
+        """
+        Returns True if the current last tag version on master is the same
+        than our local version in mamba/_version.py, otherwise returns False
         """
 
-        if check_file is None:
-            check_file = 'mamba'
+        l = local(
+            'git describe --abbrev=0 --tags --exact-match master',
+            capture=True
+        )
 
-        if self.git_versions.get(check_file) is not None:
-            return self.git_versions[check_file]
+        return l.stdout == self.git_current_mamba_version()
+
+    @check_directory
+    def git_create_tag(self):
+        """Create a new release version tag on last git master branch commit
+        """
+
+        if self.current_version_is_last_version():
+            abort(
+                'git_create_tag was called but current git version is the '
+                'same version that the local one'
+            )
+
+        version = self.get_current_mamba_version()
+        result = local('git tag {version}'.format(version=version))
+
+        if result.failed:
+            abort('We can\'t set tag {version}...'.format(version=version))
+
+
+class Updater(object):
+    """Updater convenience class that works with the mamba files directly
+    """
+
+    def __init__(self):
+        self.git = Git()
+
+    @check_directory
+    def update_script_version(self, script):
+        """Update a mamba-admin script version
+        """
+
+        module = imp.load_source(
+            script, 'mamba/scripts/{script}'.format(script=script))
+        current_version = module.version
+        current_version_string = 'versions.{repr}'.format(
+            repr=repr(current_version)
+        )
+
+        major = current_version.major
+        minor = current_version.minor
+        micro = current_version.micro
+        rc = current_version.prerelease
+
+        if settings.is_bugfix:
+            micro += 1
+        elif settings.is_new_feature:
+            minor += 1
+            micro = 0
+        elif settings.is_major_release:
+            major += 1
+            minor = micro = 0
+
+        if settings.is_release_candidate:
+            if rc is None:
+                rc = 1
+            else:
+                rc += 1
+
+            rc = ', {rc}'.format(rc=rc)
         else:
-            self.git_update_last_commit[
-                None if check_file == 'mamba' else check_file]
-            return self.git_versions[check_file]
+            rc = ''
+
+        new_version_string = (
+            'versions.Version(\'{package}\', {major}, {minor}, {micro}{rc})')
+
+        sed = (
+            'sed -i "s/{current_version}/{new_version}" '
+            'mamba/scripts/{script}'.format(
+                current_version=current_version_string,
+                new_version=new_version_string.format(
+                    package=current_version.package,
+                    major=major,
+                    minor=minor,
+                    micro=micro,
+                    rc=rc
+                ),
+                script=script
+            )
+        )
+        l = local(sed, capture=True)
+        if l.failed:
+            abort('Can\'t update {script} script version: {error}'.format(
+                script=script, error=l.stdout + ' ' + l.stderr
+            ))
+
+
+class Release(object):
+    """A convenience class for the release/update process for Mamba
+    """
+
+    def __init__(self):
+        self.steps = Steps()
+        self.define()
+
+    def define(self):
+        """Define the full update-release process for mamba releases
+        """
+
+        git = Git()                                 # git object
+        updater = Updater()                         # updater object
+
+        self.steps.add(git.go_master_branch)        # checkout master
+        self.steps.add(git.git_pull)                # pull on master
+
+        versions = git.git_compare_versions()
+        for script, no_changes in versions.iteritems():
+            if no_changes is True:                  # same version, no changes
+                log.msg(
+                    '{script} mamba-admin script should remain in its actual '
+                    'version because no changes has been detected'.format(
+                        script=script
+                    )
+                )
+            else:
+                log.msg(
+                    'Updating {script} mamba-admin script to version '
+                    '{version}, changes has been detected'.format(
+                        script=script
+                    )
+                )
+                updater.update_script_version(script)
+
+    def start(self):
+        """Start the release proccess
+        """
+
+        self.steps.run()
 
 
 # this task must be the only one task in the entire file
@@ -129,15 +291,10 @@ class Main(Task):
     name = 'main'
 
     def run(self):
-        log.msg('Running {num_tests} steps...'.format(
-            num_tests=updater_steps.length))
-        updater_steps.run()
-
-
-updater = Updater()
-updater_steps = Steps()
-
-updater_steps.add(updater.git_pull)
-
+        log.msg('Instancing updater object...')
+        release = Release()
+        log.msg('Starting update/release process...')
+        release.start()
+        log.msg('Update/Release done!')
 
 instance = Main()
