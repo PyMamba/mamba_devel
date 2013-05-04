@@ -3,12 +3,14 @@
 # See LICENSE for more details
 
 import imp
+import datetime
 import functools
+from string import Template
 
-from twisted.python import log, filepath
+from twisted.python import log, filepath, versions
 
 from fabric.tasks import Task
-from fabric.api import lcd, local, abort, env
+from fabric.api import lcd, local, abort
 
 import settings
 
@@ -73,7 +75,7 @@ class Steps(object):
                     'error executing step {step_number}: {error}'.format(
                         step_number=self.__steps.index(step), error=error)
                 )
-                return
+                raise  # propagate
 
 
 class Git(object):
@@ -104,7 +106,8 @@ class Git(object):
         """Return back the current mamba version
         """
 
-        mamba = imp.load_source('version', 'mamba/_version.py')
+        mamba = imp.load_source(
+            'version', mamba_directory + '/mamba/_version.py')
         return mamba.version
 
     @check_directory
@@ -119,10 +122,10 @@ class Git(object):
         """Compare the latest versions of mamba scripts
         """
 
-        versions = {}
+        git_versions = {}
         mamba_version = self.get_current_mamba_version()
 
-        for script in filepath.listdir('./mamba/scripts'):
+        for script in filepath.listdir(mamba_directory + './mamba/scripts'):
             if script == 'test':
                 continue
             if script.endswith('.pyc') or script.endswith('.pyo'):
@@ -130,48 +133,79 @@ class Git(object):
             if script in ['__init__.py', 'commons.py', 'mamba_admin.py']:
                 continue
 
-            log = 'git log -1 --pretty=format:"%H %at" {v} {script}'
+            log = 'git log -1 --pretty=format:"%at" {v} {script}'
 
-            l = local(
-                log.format(v=mamba_version.short(), script=script),
+            last = local(
+                log.format(
+                    v=mamba_version.short(),
+                    script='mamba/scripts/' + script
+                ),
                 capture=True
             )
-            r = local(log.format(v='', script=script), capture=True)
+            current = local(
+                log.format(v='', script='mamba/scripts/' + script),
+                capture=True
+            )
 
-            versions[script] = l.stdout == r.stdout
+            git_versions[script] = int(last.stdout) < int(current.stdout)
 
-        return versions
+        return git_versions
 
     @check_directory
-    def current_version_is_last_version(self):
-        """
-        Returns True if the current last tag version on master is the same
-        than our local version in mamba/_version.py, otherwise returns False
+    def commit_release(self):
+        """Commit the changes made to this release
         """
 
-        l = local(
-            'git describe --abbrev=0 --tags --exact-match master',
-            capture=True
+        git_add = 'git add docs/relnotes mamba/_version.py mamba/scripts'
+        git_commit = 'git commit -m "release {version}"'.format(
+            version=self.get_current_mamba_version()
         )
-
-        return l.stdout == self.git_current_mamba_version()
+        if settings.pretend:
+            print('PRETEND: ' + git_add)
+            print('PRETEND: ' + git_commit)
+        else:
+            local(git_add)
+            local(git_commit)
 
     @check_directory
     def git_create_tag(self):
         """Create a new release version tag on last git master branch commit
         """
 
-        if self.current_version_is_last_version():
-            abort(
-                'git_create_tag was called but current git version is the '
-                'same version that the local one'
-            )
+        version = self.get_current_mamba_version().short()
+        git_tag = 'git tag {version}'.format(version=version)
 
-        version = self.get_current_mamba_version()
-        result = local('git tag {version}'.format(version=version))
+        if settings.pretend:
+            print('PRETEND: ' + git_tag)
+        else:
+            result = local(git_tag)
 
-        if result.failed:
-            abort('We can\'t set tag {version}...'.format(version=version))
+            if result.failed:
+                abort('We can\'t set tag {version}...'.format(version=version))
+
+    @check_directory
+    def git_push(self):
+        """Push the new tag and commit to github and bitbucket
+
+        WARNING: You should have write permission in the GitHub (origin)
+                 and BitBucket (bitbucket) repos!!! (core developer mainly)
+        """
+
+        git_push = 'git push origin master'
+        git_push_bitbucket = 'git push bitbucket master'
+        git_push_tags = 'git push --tags origin'
+        git_push_tags_bitbucket = 'git push --tags bitbucket'
+
+        if settings.pretend:
+            print('PRETEND: ' + git_push)
+            print('PRETEND: ' + git_push_bitbucket)
+            print('PRETEND: ' + git_push_tags)
+            print('PRETEND: ' + git_push_tags_bitbucket)
+        else:
+            local(git_push)
+            local(git_push_bitbucket)
+            local(git_push_tags)
+            local(git_push_tags_bitbucket)
 
 
 class Updater(object):
@@ -186,24 +220,26 @@ class Updater(object):
         """Update a mamba-admin script version
         """
 
-        module = imp.load_source(
-            script, 'mamba/scripts/{script}'.format(script=script))
-        current_version = module.version
-        current_version_string = 'versions.{repr}'.format(
-            repr=repr(current_version)
+        version = None
+        l = local('grep versions.Version mamba/scripts/{script}'.format(
+            script=script),
+            capture=True
         )
 
-        major = current_version.major
-        minor = current_version.minor
-        micro = current_version.micro
-        rc = current_version.prerelease
+        exec(l.stdout)
+        version_string = 'versions.{repr}'.format(repr=repr(version))
+
+        major = version.major
+        minor = version.minor
+        micro = version.micro
+        rc = version.prerelease
 
         if settings.is_bugfix:
             micro += 1
-        elif settings.is_new_feature:
+        elif settings.is_minor:
             minor += 1
             micro = 0
-        elif settings.is_major_release:
+        elif settings.is_major:
             major += 1
             minor = micro = 0
 
@@ -221,11 +257,11 @@ class Updater(object):
             'versions.Version(\'{package}\', {major}, {minor}, {micro}{rc})')
 
         sed = (
-            'sed -i "s/{current_version}/{new_version}" '
+            'sed -i "s/{current_version}/{new_version}/" '
             'mamba/scripts/{script}'.format(
-                current_version=current_version_string,
+                current_version=version_string,
                 new_version=new_version_string.format(
-                    package=current_version.package,
+                    package=version.package,
                     major=major,
                     minor=minor,
                     micro=micro,
@@ -234,11 +270,139 @@ class Updater(object):
                 script=script
             )
         )
-        l = local(sed, capture=True)
-        if l.failed:
-            abort('Can\'t update {script} script version: {error}'.format(
-                script=script, error=l.stdout + ' ' + l.stderr
-            ))
+
+        if settings.pretend:
+            print(sed)
+        else:
+            l = local(sed, capture=True)
+            if l.failed:
+                abort('Can\'t update {script} script version: {error}'.format(
+                    script=script, error=l.stdout + ' ' + l.stderr
+                ))
+
+    @check_directory
+    def update_mamba_version(self):
+        """Update mamba version
+        """
+
+        current_version = self.git.get_current_mamba_version()
+        version_template = Template(
+            filepath.FilePath(
+                '../../mamba/templates/version.tpl').open('r').read()
+        )
+
+        major = current_version.major
+        minor = current_version.minor
+        micro = current_version.micro
+        rc = current_version.prerelease
+
+        if settings.is_bugfix:
+            micro += 1
+        elif settings.is_minor:
+            minor += 1
+            micro = 0
+        elif settings.is_major:
+            major += 1
+            minor = micro = 0
+
+        if settings.is_release_candidate:
+            if rc is None:
+                rc = 1
+            else:
+                rc += 1
+
+            rc = ', {rc}'.format(rc=rc)
+        else:
+            rc = ''
+
+        args = {'major': major, 'minor': minor, 'micro': micro, 'rc': rc}
+
+        if settings.pretend:
+            print(version_template.safe_substitute(**args))
+        else:
+            with open('../../mamba/_version.py', 'w') as version_file:
+                version_file.write(version_template.safe_substitute(**args))
+
+    @check_directory
+    def generate_sdist(self):
+        """Generate source distribution package for PyPI Directory
+        """
+
+        local('python setup.py sdist --format=bztar')
+
+    @check_directory
+    def upload_to_pypi(self):
+        """Upload package to PyPI Directory Index
+        """
+
+        upload = 'python setup.py sdist --format=bztar upload'
+        if settings.pretend:
+            print upload
+        else:
+            local(upload)
+
+    @check_directory
+    def generate_version_relnotes(self, current_version):
+        """
+        Generate the new release notes using the index.rst template on
+        docs directory
+        """
+
+        relnotes_template = Template(
+            filepath.FilePath('../../docs/relnotes/index.rst').open('r').read()
+        )
+
+        mamba = imp.load_source('mamba', mamba_directory + 'mamba/_version.py')
+        version = mamba.version.short()
+
+        args = {
+            'version': version,
+            'release_date': datetime.datetime.today().strftime('%B %d, %Y'),
+            'current_version': current_version
+        }
+
+        if settings.pretend:
+            print relnotes_template.safe_substitute(**args)
+        else:
+            relnote_file = '../../docs/relnotes/{}.rst'.format(version)
+            with open(relnote_file, 'w+') as f:
+                f.write(relnotes_template.safe_substitute(**args))
+
+        index_rst = (
+            'Release Notes for Mamba ${version}\n'
+            '==================================\n'
+            '\n'
+            '..\n'
+            '   Any new feature or bugfix should be listed in this file, '
+            'for trivial fixes\n    or features a bulleted list item is '
+            'enough but for more sphisticated\n    additions a subsection '
+            'for their own is required.\n'
+            '\n'
+            'Those are the release notes for Mamba ${version} released '
+            'on ${release_date}.\n'
+            '\n'
+            'Features\n'
+            '--------\n\n'
+            'Bug Fixes\n'
+            '---------\n\n'
+            'Deprecations\n'
+            '------------\n\n'
+            'Removals\n'
+            '--------\n\n'
+            'Uncompatible Changes\n'
+            '--------------------\n\n'
+            'Details\n'
+            '-------\n\n'
+            'If you need a more detailed description of the changes made '
+            'in this release you\ncan use git itself using::\n\n'
+            '   git log ${current_version}..${version}\n'
+        )
+
+        if settings.pretend:
+            print index_rst
+        else:
+            with open('../../docs/relnotes/index.rst', 'w+') as index:
+                index.write(index_rst)
 
 
 class Release(object):
@@ -253,15 +417,41 @@ class Release(object):
         """Define the full update-release process for mamba releases
         """
 
-        git = Git()                                 # git object
-        updater = Updater()                         # updater object
+        git = Git()                                     # git object
+        updater = Updater()                             # updater object
+        current = git.get_current_mamba_version()       # current version
 
-        self.steps.add(git.go_master_branch)        # checkout master
-        self.steps.add(git.git_pull)                # pull on master
+        self.steps.add(git.go_master_branch)            # checkout master
+        self.steps.add(git.git_pull)                    # pull on master
+        self.define_scripts(git, updater)               # release CLI scripts
+        self.steps.add(updater.update_mamba_version)    # release mamba
+        # generate release notes for this new release
+        self.steps.add({
+            'callable': updater.generate_version_relnotes,
+            'arguments': current.short()
+        })
+        if bool(settings.no_distribute) is False:
+            # self.steps.add(updater.generate_sdist)    # source distribution
+            self.steps.add(updater.upload_to_pypi)      # upload to PyPI
 
-        versions = git.git_compare_versions()
-        for script, no_changes in versions.iteritems():
-            if no_changes is True:                  # same version, no changes
+        if bool(settings.only_distribute) is False:
+            self.steps.add(git.commit_release)          # commit release
+            self.steps.add(git.git_create_tag)          # tag the release
+            self.steps.add(git.git_push)                # push to git repos
+
+        # push should trigger GitHub hooks perform buildbot release build
+        # and update main site donwloads and documentation and send the
+        # emails with the content of relnotes
+        # all this process have to be done in complete automatic way except
+        # for the first invocation of updater script
+
+    def define_scripts(self, git, updater):
+        """Define release update for mamba-admin scripts
+        """
+
+        git_versions = git.git_compare_versions()
+        for script, changes in git_versions.iteritems():
+            if changes is False:                    # same version, no changes
                 log.msg(
                     '{script} mamba-admin script should remain in its actual '
                     'version because no changes has been detected'.format(
@@ -270,12 +460,16 @@ class Release(object):
                 )
             else:
                 log.msg(
-                    'Updating {script} mamba-admin script to version '
-                    '{version}, changes has been detected'.format(
+                    '{script} mamba-admin script is going to be updated to '
+                    'a new version, changes has been detected'.format(
                         script=script
                     )
                 )
-                updater.update_script_version(script)
+                # udpate script to next release version
+                self.steps.add({
+                    'callable': updater.update_script_version,
+                    'arguments': script
+                })
 
     def start(self):
         """Start the release proccess
