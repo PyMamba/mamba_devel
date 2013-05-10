@@ -8,6 +8,7 @@ import functools
 from string import Template
 
 from twisted.python import log, filepath, versions
+assert versions
 
 from fabric.tasks import Task
 from fabric.api import lcd, local, abort
@@ -328,14 +329,16 @@ class Updater(object):
         """Generate source distribution package for PyPI Directory
         """
 
-        local('python setup.py sdist --format=bztar')
+        local('python setup.py sdist --target-version=2.7 --format=bztar')
 
     @check_directory
     def upload_to_pypi(self):
         """Upload package to PyPI Directory Index
         """
 
-        upload = 'python setup.py sdist --format=bztar upload'
+        upload = (
+            'python setup.py sdist --target-version=2.7 --format=bztar upload'
+        )
         if settings.pretend:
             print upload
         else:
