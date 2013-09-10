@@ -1,7 +1,7 @@
 Mamba Development Tools
 =======================
 
-This package is meant to be used by Mamba develpers. This package contains tools and utilities that are useful for the development and release process of Mamba Framework but is nto useful by itself to any other purpose. If you are not a Mamba developer this package is pretty unusable for you.
+This package is meant to be used by Mamba developers. This package contains tools and utilities that are useful for the development and release process of Mamba Framework but is not useful by itself to any other purpose. If you are not a Mamba developer this package is pretty unusable for you.
 
 =======
 License
