@@ -25,7 +25,6 @@ def check_directory(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         mamba = filepath.FilePath(mamba_directory)
-        print(mamba)
         mamba_git = filepath.FilePath(mamba_directory + '.git')
 
         if mamba.exists() and mamba.isdir():
